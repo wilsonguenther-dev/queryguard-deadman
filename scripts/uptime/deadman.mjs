@@ -11,10 +11,14 @@
 // PASS/FAIL, the URL, the status and a reason code. Exit 1 on any failure (the failed run is the alert).
 //
 // Then (§6 step 2, QGU-U5B) it GETs https://drivia.consulting/api/uptime/heartbeat (same timeout and retry) and fails
-// unless the answer is 200 with "ok": true and age_s <= 1200 (the pg_cron prober checked something in the last 20 minutes).
+// unless the answer is 200 with "ok": true and age_s <= HEARTBEAT_MAX_AGE_S. The route itself answers 503 heartbeat_stale
+// once the pg_cron prober's newest check is over 1200 s old, so that 503 is the prober-freshness alarm; the client-side
+// age_s ceiling is a second line only (default 21600 s = 6 h, env HEARTBEAT_MAX_AGE_S overrides; the same 6 h as the
+// reciprocal threshold, because GitHub runs this schedule hours late on this account: docs/uptime/DEADMAN.md).
 // A 503 carries a reason code from the body (heartbeat_stale, stale_monitors, alerts_stale); nothing else from it is printed.
 // The User-Agent 'uptime-deadman/1' is also how the heartbeat knows the dead-man is alive: each call stamps
-// ops.uptime_deadman_seen, and database #2 emails ops when that stamp is over 60 minutes old (the reciprocal dead-man).
+// ops.uptime_deadman_seen, and database #2 emails ops when that stamp is older than ops.app_config
+// 'uptime_deadman_silence_threshold' (default 6 hours; the reciprocal dead-man).
 //
 //   node scripts/uptime/deadman.mjs                 probe every target in docs/uptime/deadman-targets.json, then the heartbeat
 //   node scripts/uptime/deadman.mjs --target <url>  probe <url> alone (keyword none, no heartbeat); honoured ONLY when
@@ -31,7 +35,10 @@ const TARGETS_FILE = resolve(dirname(fileURLToPath(import.meta.url)), '../../doc
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const LIVE = { timeoutMs: 10_000, retryDelayMs: 20_000, maxRetryAfterMs: 20_000, max429Retries: 2 };
 const HEARTBEAT = { name: 'drivia.consulting heartbeat', url: 'https://drivia.consulting/api/uptime/heartbeat', heartbeat: true };
-const HEARTBEAT_MAX_AGE_S = 1200;
+const HEARTBEAT_MAX_AGE_S = (() => {
+  const v = Number(process.env.HEARTBEAT_MAX_AGE_S);
+  return Number.isFinite(v) && v > 0 ? v : 21_600;
+})();
 
 // The heartbeat's verdict from its JSON (docs/specs/QUERYGUARD-UPTIME.md §6 + R-F). Returns a reason code, never the body.
 function heartbeatReason(status, body) {
@@ -198,7 +205,7 @@ async function runSelfTest() {
         return;
       case '/hb-stale-200':
         res.writeHead(200, { 'content-type': 'application/json' })
-          .end(JSON.stringify({ ok: true, last_check_at: new Date(Date.now() - 1_500_000).toISOString(), age_s: 1500 }));
+          .end(JSON.stringify({ ok: true, last_check_at: new Date(Date.now() - (HEARTBEAT_MAX_AGE_S + 300) * 1000).toISOString(), age_s: HEARTBEAT_MAX_AGE_S + 300 }));
         return;
       case '/hb-stale-503':
         res.writeHead(503, { 'content-type': 'application/json' }).end('{"ok":false,"stale":true,"age_s":1500}');

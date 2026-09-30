@@ -13,13 +13,15 @@ GitHub's own words, from https://docs.github.com/en/actions/reference/workflows-
 
 What happened here on 2026-09-30: the repo was created at 01:47Z, and 28 seconds later the first keepalive run pushed a `GITHUB_TOKEN` commit, which became the head of `main`. The workflow stayed `active`, Actions stayed enabled and the cron was valid, yet in 5 hours not one `schedule` run appeared while manual runs worked and the owner's drivia-consulting repo ran its own schedule at 05:45Z. A push to `main` by the repo owner is the documented resync, and was made at 07:11Z. The bot commit is a suspect, not a proven cause: the same account's drivia-consulting `licensing-probe` (cron `23 */6 * * *`, due 00:23/06:23/12:23/18:23 UTC) ran most days' slots 3 to 5.5 hours late (00:23 fired between 05:11 and 05:54 every day from 26 to 30 September) and ran only 3 of its 4 slots on 28 and 29 September, which is GitHub's documented delay-and-drop behaviour at a scale that makes this repo's cron a best-effort clock, not a 15-minute guarantee. Any reciprocal check on this dead-man must allow for hours of lag before it calls the schedule dead. So the rules are: no bot or `GITHUB_TOKEN` commit ever lands on `main`; after any change here the owner pushes it (not a bot); and when the dead-man goes quiet, first check `gh run list -R wilsonguenther-dev/queryguard-deadman --event schedule`, then `gh api repos/wilsonguenther-dev/queryguard-deadman/actions/workflows --jq '.workflows[]|{path,state}'`, then push a one-line owner commit to `main`.
 
+Because of that lag, Drivia Consulting's reciprocal check waits 6 hours of dead-man silence before it emails ops (database #2 `ops.app_config` key `uptime_deadman_silence_threshold`, default 6 hours), and `scripts/uptime/deadman.mjs` defaults `HEARTBEAT_MAX_AGE_S` to 21600 (env override); the heartbeat route's own 503 still fails a run when the prober is over 20 minutes stale.
+
 ## What it can see
 
 Public web addresses only (today the 2BG site's `/api/health` and home page). There are no secrets, no API keys, no tokens, no client data and no database access anywhere in this repo. Run logs are public, so the script prints only PASS/FAIL, the address, the status code and a short reason code, never a page's contents. There is no `push` or `pull_request` trigger, so code from a fork never runs here.
 
 ## How to pause it
 
-Actions tab, pick **deadman**, then **Disable workflow** (or `gh workflow disable deadman.yml -R wilsonguenther-dev/queryguard-deadman`); **Enable workflow** turns it back on. While it is paused, Drivia Consulting's own reciprocal check emails ops within an hour; that is expected.
+Actions tab, pick **deadman**, then **Disable workflow** (or `gh workflow disable deadman.yml -R wilsonguenther-dev/queryguard-deadman`); **Enable workflow** turns it back on. While it is paused, Drivia Consulting's own reciprocal check emails ops once the last run is 6 hours old (then hourly); that is expected.
 
 ## Where changes happen
 
