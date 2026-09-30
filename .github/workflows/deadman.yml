@@ -4,8 +4,8 @@ name: deadman
 # Any failure fails the run; GitHub's failed-run email to the repo owner is the alert of last resort.
 # No npm ci, no secrets. Public repo: Actions minutes are free; keepalive.yml stops the 60-day auto-disable.
 # No push / pull_request / pull_request_target trigger, so fork code never runs here.
-# Schedule rule: GitHub only (re)syncs this cron when a USER pushes to main. A GITHUB_TOKEN/bot push is not a
-# user push and left the schedule unregistered on 2026-09-30 (0 scheduled runs in 5 h). Never let a bot commit to main.
+# Schedule rule: a push to main resyncs this cron (GitHub staff). Keep bot/GITHUB_TOKEN commits off main (suspected,
+# unproven, in 0 scheduled runs over 5 h on 2026-09-30). GitHub cron on this account also runs HOURS late and drops slots.
 # See README "Schedule rules".
 on:
   schedule:
