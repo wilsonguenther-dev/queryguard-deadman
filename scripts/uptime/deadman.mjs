@@ -10,10 +10,14 @@
 // Run logs of the public repo are readable by anyone, so this prints NO response body: one line per target with
 // PASS/FAIL, the URL, the status and a reason code. Exit 1 on any failure (the failed run is the alert).
 //
-// The heartbeat check (§6 step 2) is QGU-U5B and is not here yet.
+// Then (§6 step 2, QGU-U5B) it GETs https://drivia.consulting/api/uptime/heartbeat (same timeout and retry) and fails
+// unless the answer is 200 with "ok": true and age_s <= 1200 (the pg_cron prober checked something in the last 20 minutes).
+// A 503 carries a reason code from the body (heartbeat_stale, stale_monitors, alerts_stale); nothing else from it is printed.
+// The User-Agent 'uptime-deadman/1' is also how the heartbeat knows the dead-man is alive: each call stamps
+// ops.uptime_deadman_seen, and database #2 emails ops when that stamp is over 60 minutes old (the reciprocal dead-man).
 //
-//   node scripts/uptime/deadman.mjs                 probe every target in docs/uptime/deadman-targets.json
-//   node scripts/uptime/deadman.mjs --target <url>  probe <url> alone (keyword none); honoured ONLY when
+//   node scripts/uptime/deadman.mjs                 probe every target in docs/uptime/deadman-targets.json, then the heartbeat
+//   node scripts/uptime/deadman.mjs --target <url>  probe <url> alone (keyword none, no heartbeat); honoured ONLY when
 //                                                   GITHUB_EVENT_NAME is workflow_dispatch (alert-path proof)
 //   node scripts/uptime/deadman.mjs --self-test     run the same logic against in-process fixtures, exit 0 iff
 //                                                   every fixture produces its expected verdict
@@ -26,6 +30,29 @@ const USER_AGENT = 'uptime-deadman/1';
 const TARGETS_FILE = resolve(dirname(fileURLToPath(import.meta.url)), '../../docs/uptime/deadman-targets.json');
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const LIVE = { timeoutMs: 10_000, retryDelayMs: 20_000, maxRetryAfterMs: 20_000, max429Retries: 2 };
+const HEARTBEAT = { name: 'drivia.consulting heartbeat', url: 'https://drivia.consulting/api/uptime/heartbeat', heartbeat: true };
+const HEARTBEAT_MAX_AGE_S = 1200;
+
+// The heartbeat's verdict from its JSON (docs/specs/QUERYGUARD-UPTIME.md §6 + R-F). Returns a reason code, never the body.
+function heartbeatReason(status, body) {
+  let j = null;
+  try {
+    j = JSON.parse(body.toString('utf8'));
+  } catch {
+    j = null;
+  }
+  if (status !== 200) {
+    if (j && j.alerts_stale === true) return 'alerts_stale';
+    if (j && j.stale === true) return 'heartbeat_stale';
+    if (j && typeof j.stale_monitors === 'number') return 'stale_monitors';
+    return `http_${status}`;
+  }
+  if (!j || typeof j !== 'object') return 'bad_body';
+  if (j.ok !== true) return 'not_ok';
+  if (typeof j.age_s !== 'number' || !Number.isFinite(j.age_s)) return 'bad_body';
+  if (j.age_s > HEARTBEAT_MAX_AGE_S) return 'heartbeat_stale';
+  return 'ok';
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -65,6 +92,7 @@ async function attempt(target, opts) {
     if (res.status === 429) {
       return { status: 429, reason: 'rate_limited', retryAfterMs: parseRetryAfter(res.headers.get('retry-after')) };
     }
+    if (target.heartbeat) return { status: res.status, reason: heartbeatReason(res.status, body) };
     if (res.status < 200 || res.status > 299) return { status: res.status, reason: `http_${res.status}` };
     if (typeof target.keyword === 'string' && !body.includes(Buffer.from(target.keyword, 'utf8'))) {
       return { status: res.status, reason: 'keyword_missing' };
@@ -114,6 +142,7 @@ function loadTargets() {
 
 async function runLive(argv) {
   let targets = loadTargets();
+  let dispatchOnly = false;
   const i = argv.indexOf('--target');
   if (i !== -1) {
     const url = argv[i + 1];
@@ -124,8 +153,10 @@ async function runLive(argv) {
       return 1;
     } else {
       targets = [{ name: 'dispatch target', url, keyword: null }];
+      dispatchOnly = true;
     }
   }
+  if (!dispatchOnly) targets = [...targets, HEARTBEAT];
   const results = await Promise.all(targets.map((t) => probe(t, LIVE)));
   let failed = 0;
   targets.forEach((t, k) => {
@@ -159,6 +190,25 @@ async function runSelfTest() {
         return;
       case '/timeout':
         return; // never answers; the client's abort ends it
+      // Heartbeat fixtures: the real route's body shapes (counts and ages only, no monitor name or URL). Freshness comes
+      // from the prober's last_check_at alone; the dead-man's own call never makes a heartbeat fresh.
+      case '/hb-fresh':
+        res.writeHead(200, { 'content-type': 'application/json' })
+          .end(JSON.stringify({ ok: true, last_check_at: new Date(Date.now() - 42_000).toISOString(), age_s: 42 }));
+        return;
+      case '/hb-stale-200':
+        res.writeHead(200, { 'content-type': 'application/json' })
+          .end(JSON.stringify({ ok: true, last_check_at: new Date(Date.now() - 1_500_000).toISOString(), age_s: 1500 }));
+        return;
+      case '/hb-stale-503':
+        res.writeHead(503, { 'content-type': 'application/json' }).end('{"ok":false,"stale":true,"age_s":1500}');
+        return;
+      case '/hb-alerts-stale':
+        res.writeHead(503, { 'content-type': 'application/json' }).end('{"ok":false,"alerts_stale":true}');
+        return;
+      case '/hb-not-ok':
+        res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":false}');
+        return;
       case '/429-then-200':
         hits429 += 1;
         if (hits429 === 1) res.writeHead(429, { 'retry-after': '0' }).end('slow down');
@@ -178,11 +228,16 @@ async function runSelfTest() {
     { name: 'timeout', path: '/timeout', keyword: null, expect: 'FAIL', reason: 'timeout' },
     { name: '429-then-200', path: '/429-then-200', keyword: '"ok":true', expect: 'PASS', reason: 'ok' },
     { name: 'http-404', path: '/not-found', keyword: null, expect: 'FAIL', reason: 'http_404' },
+    { name: 'heartbeat-fresh', path: '/hb-fresh', heartbeat: true, expect: 'PASS', reason: 'ok' },
+    { name: 'heartbeat-stale-200', path: '/hb-stale-200', heartbeat: true, expect: 'FAIL', reason: 'heartbeat_stale' },
+    { name: 'heartbeat-stale-503', path: '/hb-stale-503', heartbeat: true, expect: 'FAIL', reason: 'heartbeat_stale' },
+    { name: 'heartbeat-alerts-stale-503', path: '/hb-alerts-stale', heartbeat: true, expect: 'FAIL', reason: 'alerts_stale' },
+    { name: 'heartbeat-not-ok', path: '/hb-not-ok', heartbeat: true, expect: 'FAIL', reason: 'not_ok' },
   ];
   let mismatches = 0;
   try {
     for (const f of fixtures) {
-      const r = await probe({ name: f.name, url: base + f.path, keyword: f.keyword }, opts);
+      const r = await probe({ name: f.name, url: base + f.path, keyword: f.keyword ?? null, heartbeat: f.heartbeat === true }, opts);
       const got = r.pass ? 'PASS' : 'FAIL';
       const ok = got === f.expect && r.reason === f.reason;
       if (!ok) mismatches += 1;
