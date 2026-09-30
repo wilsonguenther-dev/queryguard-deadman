@@ -1,0 +1,4 @@
+[
+  { "name": "2BG health", "url": "https://2baldguys.vercel.app/api/health", "keyword": "\"ok\":true" },
+  { "name": "2BG home", "url": "https://2baldguys.vercel.app/", "keyword": null }
+]

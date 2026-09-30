@@ -1,0 +1,33 @@
+name: keepalive
+# GitHub disables scheduled workflows in a public repo after 60 days without repository activity. Once a month this
+# writes a UTC stamp into KEEPALIVE and commits it with the automatic GITHUB_TOKEN (no secret). It never touches
+# .github/workflows/, so the last user to change deadman.yml's cron line stays the repo owner (who gets the alert).
+# Whether a GITHUB_TOKEN commit resets the 60-day clock is UNVERIFIED; Drivia Consulting's reciprocal dead-man
+# (QGU-U5B) emails ops if the deadman schedule ever stops.
+on:
+  schedule:
+    - cron: "41 4 1 * *"   # 04:41 UTC on the 1st of every month
+  workflow_dispatch:
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Stamp and push KEEPALIVE
+        run: |
+          stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "$stamp" > KEEPALIVE
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add KEEPALIVE
+          git commit -m "keepalive: $stamp"
+          git push origin HEAD:main

@@ -1,0 +1,48 @@
+name: deadman
+# Outside dead-man switch for QueryGuard Uptime (Drivia Consulting docs/specs/QUERYGUARD-UPTIME.md §6, R-O; D42).
+# Every 15 minutes it probes each target in docs/uptime/deadman-targets.json directly (same keyword, byte-exact).
+# Any failure fails the run; GitHub's failed-run email to the repo owner is the alert of last resort.
+# No npm ci, no secrets. Public repo: Actions minutes are free; keepalive.yml stops the 60-day auto-disable.
+# No push / pull_request / pull_request_target trigger, so fork code never runs here.
+on:
+  schedule:
+    - cron: "7,22,37,52 * * * *"   # every 15 min, off the top of the hour (GitHub delays runs at :00)
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: "Optional: probe this one URL instead of the targets file (alert-path proof)"
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: deadman
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deadman:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5 (same pin as drivia-consulting licensing-probe.yml)
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/uptime
+            docs/uptime
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "24"
+      - name: Probe targets
+        env:
+          TARGET_URL: ${{ github.event_name == 'workflow_dispatch' && inputs.target_url || '' }}
+        run: |
+          if [ -n "$TARGET_URL" ]; then
+            node scripts/uptime/deadman.mjs --target "$TARGET_URL"
+          else
+            node scripts/uptime/deadman.mjs
+          fi
