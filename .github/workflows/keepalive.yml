@@ -1,9 +1,12 @@
 name: keepalive
 # GitHub disables scheduled workflows in a public repo after 60 days without repository activity. Once a month this
-# writes a UTC stamp into KEEPALIVE and commits it with the automatic GITHUB_TOKEN (no secret). It never touches
-# .github/workflows/, so the last user to change deadman.yml's cron line stays the repo owner (who gets the alert).
-# Whether a GITHUB_TOKEN commit resets the 60-day clock is UNVERIFIED; Drivia Consulting's reciprocal dead-man
-# (QGU-U5B) emails ops if the deadman schedule ever stops.
+# calls the documented REST endpoint "Enable a workflow" (PUT /repos/{owner}/{repo}/actions/workflows/{id}/enable,
+# which "sets the state of the workflow to active") for both workflows, then asserts state=active. It makes NO commit:
+# the original version pushed a KEEPALIVE stamp with GITHUB_TOKEN, and the bot commit at the head of main coincided
+# with deadman's cron never firing (0 scheduled runs in 5 h on 2026-09-30) until a user pushed to main. See README.
+# Whether this call resets the 60-day inactivity clock is UNVERIFIED (GitHub does not document what counts as
+# activity); if deadman is ever disabled_inactivity, this run re-enables it, and Drivia Consulting's reciprocal
+# dead-man (QGU-U5B) emails ops if the deadman schedule ever stops.
 on:
   schedule:
     - cron: "41 4 1 * *"   # 04:41 UTC on the 1st of every month
@@ -14,20 +17,22 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  actions: write
 
 jobs:
   keepalive:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - name: Stamp and push KEEPALIVE
+      - name: Re-enable scheduled workflows (no commit)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
-          stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          echo "$stamp" > KEEPALIVE
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add KEEPALIVE
-          git commit -m "keepalive: $stamp"
-          git push origin HEAD:main
+          set -euo pipefail
+          for wf in deadman.yml keepalive.yml; do
+            gh api -X PUT "repos/$REPO/actions/workflows/$wf/enable" --silent
+            state="$(gh api "repos/$REPO/actions/workflows/$wf" --jq .state)"
+            echo "$wf state=$state"
+            [ "$state" = "active" ]
+          done
