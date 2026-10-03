@@ -4,9 +4,12 @@ name: keepalive
 # which "sets the state of the workflow to active") for both workflows, then asserts state=active. It makes NO commit:
 # the original version pushed a KEEPALIVE stamp with GITHUB_TOKEN, and the bot commit at the head of main coincided
 # with deadman's cron never firing (0 scheduled runs in 5 h on 2026-09-30) until a user pushed to main. See README.
-# Whether this call resets the 60-day inactivity clock is UNVERIFIED (GitHub does not document what counts as
-# activity); if deadman is ever disabled_inactivity, this run re-enables it, and Drivia Consulting's reciprocal
-# dead-man (QGU-U5B) emails ops if the deadman schedule ever stops.
+# It enables a workflow ONLY when its state is disabled_inactivity, and never one in state disabled_manually: that is
+# an operator pause (Drivia Consulting docs/uptime/DEADMAN.md "How to pause it"), and undoing it would silently resume
+# probes and failure emails (RV-176-1). Whether this call resets the 60-day inactivity clock is UNVERIFIED, and the
+# cutoff disables THIS workflow too, so the re-enabler that survives it lives outside this repo: Drivia Consulting's
+# uptime sweep (every 5 minutes) does the same state check with a token scoped to this repo's Actions only. The
+# reciprocal dead-man (QGU-U5B) emails ops if the deadman schedule ever stays off.
 on:
   schedule:
     - cron: "41 4 1 * *"   # 04:41 UTC on the 1st of every month
@@ -24,15 +27,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
-      - name: Re-enable scheduled workflows (no commit)
+      - name: Re-enable workflows GitHub switched off for inactivity (never an operator pause; no commit)
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           for wf in deadman.yml keepalive.yml; do
-            gh api -X PUT "repos/$REPO/actions/workflows/$wf/enable" --silent
             state="$(gh api "repos/$REPO/actions/workflows/$wf" --jq .state)"
-            echo "$wf state=$state"
-            [ "$state" = "active" ]
+            case "$state" in
+              active) echo "$wf state=active" ;;
+              disabled_inactivity)
+                gh api -X PUT "repos/$REPO/actions/workflows/$wf/enable" --silent
+                state="$(gh api "repos/$REPO/actions/workflows/$wf" --jq .state)"
+                echo "$wf was disabled_inactivity, now state=$state"
+                [ "$state" = "active" ] ;;
+              disabled_manually) echo "$wf state=disabled_manually: operator pause, left off" ;;
+              *) echo "$wf unexpected state=$state"; exit 1 ;;
+            esac
           done
